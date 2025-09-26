@@ -264,6 +264,10 @@ let needSetup = false;
     const statusPageRouter = require("./routers/status-page-router");
     app.use(statusPageRouter);
 
+    // Summary Router
+    const summaryRouter = require("./routers/summary-router");
+    app.use(summaryRouter);
+
     // Universal Route Handler, must be at the end of all express routes.
     app.get("*", async (_request, response) => {
         if (_request.originalUrl.startsWith("/upload/")) {
@@ -1696,7 +1700,7 @@ let needSetup = false;
                 
                 const queryStartTime = Date.now();
                 
-                // Optimized query: avoid JULIANDAY() calculations on every row
+                // Optimized query: Use simple duration comparison (avoids JULIANDAY but maintains correctness)
                 let result = await R.getRow(`
                     SELECT
                         SUM(
@@ -1707,7 +1711,7 @@ let needSetup = false;
                         ) AS total_duration,
                         SUM(
                             CASE
-                                WHEN (status = 1 OR status = 3) THEN
+                                WHEN status IN (1,3) THEN
                                     CASE
                                         WHEN duration > ? THEN ?
                                         ELSE duration
