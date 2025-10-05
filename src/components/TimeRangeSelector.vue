@@ -12,34 +12,38 @@
             </button>
             <ul class="dropdown-menu">
                 <li>
-                    <div class="px-1 py-1" @click.stop>
+                    <div class="px-2 py-1" @click.stop>
                         <!-- Custom Range Section -->
-                        <div class="mb-2">
-                            <h6 class="custom-range-header mb-1">Custom Range</h6>
+                        <div class="mb-3">
+                            <h6 class="custom-range-header mb-2">Custom Range</h6>
                             
                             <!-- Date inputs with better styling -->
                             <div class="date-inputs">
                                 <div class="mb-2">
                                     <label class="form-label-sm mb-1">From:</label>
-                                    <input 
-                                        v-model="customFrom" 
-                                        type="datetime-local" 
-                                        class="form-control form-control-sm date-input"
-                                        :max="customTo"
-                                        @change="updateCustomRange"
-                                        @focus="onDateInputFocus"
-                                    >
+                                    <div class="date-input-wrapper">
+                                        <input 
+                                            v-model="customFrom" 
+                                            type="datetime-local" 
+                                            class="form-control form-control-sm date-input"
+                                            :max="customTo"
+                                            @change="updateCustomRange"
+                                            @focus="onDateInputFocus"
+                                        >
+                                    </div>
                                 </div>
                                 <div class="mb-2">
                                     <label class="form-label-sm mb-1">To:</label>
-                                    <input 
-                                        v-model="customTo" 
-                                        type="datetime-local" 
-                                        class="form-control form-control-sm date-input"
-                                        :min="customFrom"
-                                        @change="updateCustomRange"
-                                        @focus="onDateInputFocus"
-                                    >
+                                    <div class="date-input-wrapper">
+                                        <input 
+                                            v-model="customTo" 
+                                            type="datetime-local" 
+                                            class="form-control form-control-sm date-input"
+                                            :min="customFrom"
+                                            @change="updateCustomRange"
+                                            @focus="onDateInputFocus"
+                                        >
+                                    </div>
                                 </div>
                             </div>
                             
@@ -55,17 +59,18 @@
                             <div v-if="customFrom && customTo" class="mt-1">
                                 <button 
                                     type="button" 
-                                    class="btn btn-success btn-sm w-100 apply-btn"
+                                    class="btn btn-sm w-100 apply-btn"
                                     @click="applyCustomRange"
+                                    style="background-color: #5cdd8b; border-color: #5cdd8b; color: white;"
                                 >
-                                    <i class="fas fa-check me-1"></i>Apply Custom Range
+                                    <i class="fas fa-check me-1"></i><span class="apply-text">Apply Custom Range</span>
                                 </button>
                             </div>
                         </div>
                         
                         <!-- Quick Ranges Section -->
                         <div>
-                            <h6 class="quick-ranges-header mb-3">Quick Ranges</h6>
+                            <h6 class="quick-ranges-header mb-2">Quick Ranges</h6>
                             <div class="quick-ranges-grid">
                                 <button 
                                     v-for="range in quickRanges" 
@@ -354,8 +359,11 @@ export default {
 }
 
 .dropdown-menu {
-    min-width: 320px;
-    padding: 0.375rem;
+    min-width: 280px;
+    padding: 0.75rem 0.5rem;
+    border: 1px solid rgba(0, 0, 0, 0.05);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    border-radius: 8px;
 }
 
 .form-control-sm {
@@ -363,9 +371,10 @@ export default {
 }
 
 .form-label-sm {
-    font-size: 0.75rem;
-    font-weight: 500;
+    font-size: 0.7rem;
+    font-weight: 400;
     color: var(--bs-gray-600);
+    margin-bottom: 0.2rem;
 }
 
 .btn-group .btn-sm {
@@ -379,50 +388,75 @@ export default {
 
 .custom-range-header,
 .quick-ranges-header {
-    font-size: 0.75rem;
+    font-size: 0.7rem;
     font-weight: 500;
-    color: var(--bs-gray-700);
+    color: var(--bs-gray-600);
     margin-bottom: 0.5rem;
     padding-bottom: 0.25rem;
     display: inline-block;
-    border-bottom: 2px solid var(--bs-success);
+    border-bottom: 1px solid #5cdd8b; /* Thinner line for minimalist look */
+    text-transform: uppercase;
+    letter-spacing: 0.03rem;
 }
 
 .quick-ranges-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 0.5rem;
+    gap: 0.4rem;
+    margin-bottom: 0.25rem;
 }
 
 .quick-range-btn {
     background: var(--bs-body-bg);
-    border: 1px solid var(--bs-gray-300);
+    border: 1px solid var(--bs-gray-200);
     color: var(--bs-gray-600);
     font-size: 0.7rem;
     padding: 0.25rem 0.375rem;
     text-align: center;
-    transition: all 0.15s ease-in-out;
-    outline: 1px solid var(--bs-gray-300);
-    outline-offset: -1px;
+    transition: all 0.2s ease;
+    border-radius: 6px;
+    outline: none;
+    position: relative;
+    overflow: hidden;
+    box-shadow: none;
+}
+
+.quick-range-btn::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(92, 221, 139, 0.05);
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+}
+
+.quick-range-btn:hover::after {
+    transform: translateX(0);
 }
 
 .quick-range-btn:hover {
-    background: var(--bs-gray-200);
-    border-color: var(--bs-gray-400);
+    background: #f8fdfb; /* very light green */
+    border-color: #5cdd8b;
+    color: #198754; /* bootstrap success color */
+    box-shadow: none;
+    transform: none;
 }
 
 .quick-range-btn.active {
-    background: var(--bs-success);
-    border-color: var(--bs-success);
+    background: #5cdd8b; /* primary heartbeat color */
+    border-color: #5cdd8b;
     color: white;
-    outline: 1px solid var(--bs-success);
+    box-shadow: none;
 }
 
 .quick-range-btn.active:hover {
-    background: var(--bs-success);
-    border-color: var(--bs-success);
+    background: #4bc77a; /* slightly darker primary for hover */
+    border-color: #4bc77a;
     color: white;
-    outline: 1px solid var(--bs-success);
+    box-shadow: none;
 }
 
 .preset-buttons {
@@ -453,21 +487,28 @@ export default {
     min-width: 70px;
 }
 
+.date-input-wrapper {
+    position: relative;
+}
+
 .date-input {
     font-size: 0.75rem;
-    transition: border-color 0.2s ease, box-shadow 0.2s ease;
-    border: 1px solid var(--bs-gray-300);
+    transition: all 0.2s ease;
+    border: 1px solid var(--bs-gray-200);
     background: var(--bs-body-bg);
-    outline: 1px solid var(--bs-gray-300);
-    outline-offset: -1px;
+    border-radius: 4px;
     padding: 0.25rem 0.5rem;
+    box-shadow: none;
+    width: 100%;
 }
 
 .date-input::-webkit-calendar-picker-indicator {
     padding: 0;
     margin: 0;
-    width: 16px;
-    height: 16px;
+    width: 14px;
+    height: 14px;
+    opacity: 0.6;
+    filter: invert(60%) sepia(89%) saturate(387%) hue-rotate(93deg) brightness(95%) contrast(85%);
 }
 
 .date-input::-webkit-datetime-edit {
@@ -475,17 +516,18 @@ export default {
 }
 
 .date-input:focus {
-    border-color: var(--bs-success);
-    box-shadow: 0 0 0 0.2rem rgba(25, 135, 84, 0.25);
+    border-color: #5cdd8b;
+    box-shadow: 0 0 0 1px rgba(92, 221, 139, 0.2);
     background: var(--bs-body-bg);
-    outline: 1px solid var(--bs-success);
+    outline: none;
 }
 
 .range-info {
-    background: var(--bs-light);
-    border-radius: 0.375rem;
-    padding: 0.5rem;
-    margin-top: 0.5rem;
+    background: rgba(92, 221, 139, 0.03);
+    border-radius: 4px;
+    padding: 0.35rem 0.5rem;
+    margin: 0.5rem 0;
+    border: none;
 }
 
 .duration-text {
@@ -494,23 +536,50 @@ export default {
 }
 
 .apply-btn {
-    border-radius: 0.375rem;
+    border-radius: 6px;
     font-weight: 500;
     transition: all 0.2s ease;
+    position: relative;
+    overflow: hidden;
+    height: 32px;
+}
+
+.apply-btn::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(255, 255, 255, 0.1);
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+}
+
+.apply-btn:hover::after {
+    transform: translateX(0);
+}
+
+.apply-text {
+    font-size: 0.75rem;
+    font-weight: 500;
+    letter-spacing: 0.01rem;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
 }
 
 .apply-btn:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 4px 8px rgba(25, 135, 84, 0.3);
+    transform: none;
+    background-color: #4bc77a; /* slightly darker primary for hover */
+    border-color: #4bc77a;
+    color: #fff;
+    box-shadow: none;
 }
 
 .quick-ranges-grid .quick-range-btn {
-    border-radius: 0.375rem;
-    font-weight: 500;
+    border-radius: 6px;
+    font-weight: 400;
 }
 
-.quick-ranges-grid .quick-range-btn:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-}
+/* Remove this rule as it's overriding our main hover styles */
 </style>
