@@ -7,7 +7,6 @@
                 data-bs-toggle="dropdown" 
                 aria-expanded="false"
             >
-                <font-awesome-icon icon="clock" />
                 {{ selectedRangeLabel }}
             </button>
             <ul class="dropdown-menu">
@@ -26,7 +25,8 @@
                                             v-model="customFrom" 
                                             type="datetime-local" 
                                             class="form-control form-control-sm date-input"
-                                            :max="customTo"
+                                            :max="getCurrentDateTime()"
+                                            placeholder="Select date and time"
                                             @change="updateCustomRange"
                                             @focus="onDateInputFocus"
                                         >
@@ -40,6 +40,8 @@
                                             type="datetime-local" 
                                             class="form-control form-control-sm date-input"
                                             :min="customFrom"
+                                            :max="getCurrentDateTime()"
+                                            placeholder="Select date and time"
                                             @change="updateCustomRange"
                                             @focus="onDateInputFocus"
                                         >
@@ -50,9 +52,13 @@
                             <!-- Enhanced range info -->
                             <div v-if="customRangeInfo" class="range-info">
                                 <div class="d-flex align-items-center">
-                                    <i class="fas fa-clock text-muted me-1"></i>
                                     <small class="text-muted duration-text">{{ customRangeInfo }}</small>
                                 </div>
+                            </div>
+                            
+                            <!-- Validation error message -->
+                            <div v-if="showValidationError" class="validation-error mt-1 mb-2">
+                                <small class="text-danger"><i class="fas fa-exclamation-circle me-1"></i>Date and time cannot be in the future</small>
                             </div>
                             
                             <!-- Apply button for custom range -->
@@ -101,6 +107,7 @@ export default {
             selectedRangeLabel: "Last 5 minutes",
             customFrom: "",
             customTo: "",
+            showValidationError: false,
             quickRanges: [
                 { value: "5m", label: "Last 5 minutes" },
                 { value: "1h", label: "Last 1 hour" },
@@ -136,19 +143,18 @@ export default {
     },
     mounted() {
         this.initializeCustomDates();
-        this.emitRangeChange();
     },
     methods: {
         selectRange(value, label) {
             this.selectedRange = value;
             this.selectedRangeLabel = label;
-            
+            // Clear any validation errors when selecting a quick range
+            this.showValidationError = false;
             // Clear custom range inputs when selecting quick ranges
             this.customFrom = "";
             this.customTo = "";
             
             this.emitRangeChange();
-            
             // Close dropdown after selecting quick range
             const dropdown = document.querySelector('.dropdown-toggle');
             if (dropdown) {
@@ -160,10 +166,20 @@ export default {
             if (this.customFrom && this.customTo) {
                 const from = new Date(this.customFrom);
                 const to = new Date(this.customTo);
+                const now = new Date();
+                
+                // Clear validation error when user makes changes
+                this.showValidationError = false;
                 
                 if (from >= to) {
                     // Auto-adjust if from is after to
                     this.customTo = this.formatDateTimeLocal(new Date(from.getTime() + 60 * 60 * 1000)); // Add 1 hour
+                }
+                
+                // Check if dates are in the future
+                if (from > now || to > now) {
+                    // Just show the validation message but don't prevent editing
+                    this.showValidationError = true;
                 }
             }
         },
@@ -172,6 +188,17 @@ export default {
             if (this.customFrom && this.customTo) {
                 const from = new Date(this.customFrom);
                 const to = new Date(this.customTo);
+                const now = new Date();
+                
+                // Validate that dates are not in the future
+                if (from > now || to > now) {
+                    // Show error message
+                    this.showValidationError = true;
+                    return;
+                }
+                
+                // Clear any validation errors
+                this.showValidationError = false;
                 
                 this.selectedRange = "custom";
                 this.selectedRangeLabel = this.formatCustomRangeLabel(from, to);
@@ -184,10 +211,17 @@ export default {
                 }
             }
         },
+        
+        getCurrentDateTime() {
+            return this.formatDateTimeLocal(new Date());
+        },
 
         setQuickCustomRange(preset) {
             const now = new Date();
             let from, to;
+            
+            // Clear any validation errors
+            this.showValidationError = false;
             
             switch (preset) {
                 case 'today':
@@ -256,6 +290,8 @@ export default {
             // Keep custom range fields empty on first load
             this.customTo = "";
             this.customFrom = "";
+            // Clear any validation errors
+            this.showValidationError = false;
         },
         
         formatDateTimeLocal(date) {
@@ -489,30 +525,65 @@ export default {
 
 .date-input-wrapper {
     position: relative;
+    display: flex;
+    align-items: center;
 }
 
 .date-input {
     font-size: 0.75rem;
     transition: all 0.2s ease;
-    border: 1px solid var(--bs-gray-200);
+    border: 1px solid var(--bs-gray-300);
     background: var(--bs-body-bg);
     border-radius: 4px;
-    padding: 0.25rem 0.5rem;
+    padding: 0.25rem 0.4rem;
     box-shadow: none;
     width: 100%;
+    font-family: var(--bs-font-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif);
+    color: var(--bs-gray-700);
+    letter-spacing: normal;
+    text-align: left;
+    font-weight: 400;
+    height: auto;
 }
 
 .date-input::-webkit-calendar-picker-indicator {
     padding: 0;
     margin: 0;
-    width: 14px;
-    height: 14px;
-    opacity: 0.6;
+    width: 16px;
+    height: 16px;
+    opacity: 0.7;
+    cursor: pointer;
     filter: invert(60%) sepia(89%) saturate(387%) hue-rotate(93deg) brightness(95%) contrast(85%);
 }
 
 .date-input::-webkit-datetime-edit {
     padding: 0;
+    text-align: left;
+}
+
+/* Fix date input symmetry */
+.date-input::-webkit-datetime-edit-fields-wrapper {
+    display: inline-flex;
+    align-items: center;
+    width: 100%;
+    gap: 0;
+}
+
+.date-input::-webkit-datetime-edit-text {
+    padding: 0;
+    color: var(--bs-gray-600);
+}
+
+.date-input::-webkit-datetime-edit-day-field,
+.date-input::-webkit-datetime-edit-month-field,
+.date-input::-webkit-datetime-edit-year-field,
+.date-input::-webkit-datetime-edit-hour-field,
+.date-input::-webkit-datetime-edit-minute-field {
+    padding: 0;
+    min-width: 1em;
+    display: inline-block;
+    font-weight: normal;
+    font-size: 0.75rem;
 }
 
 .date-input:focus {
@@ -528,6 +599,22 @@ export default {
     padding: 0.35rem 0.5rem;
     margin: 0.5rem 0;
     border: none;
+}
+
+.validation-error {
+    background-color: rgba(220, 53, 69, 0.05);
+    border-radius: 4px;
+    padding: 0.35rem 0.5rem;
+    text-align: center;
+    font-size: 0.75rem;
+}
+
+.format-hint {
+    display: block;
+    font-size: 0.65rem;
+    color: var(--bs-gray-500);
+    margin-top: -0.1rem;
+    margin-bottom: 0.2rem;
 }
 
 .duration-text {
@@ -561,7 +648,7 @@ export default {
 }
 
 .apply-text {
-    font-size: 0.75rem;
+    font-size: 0.7rem;
     font-weight: 500;
     letter-spacing: 0.01rem;
     text-rendering: optimizeLegibility;
