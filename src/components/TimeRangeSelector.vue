@@ -342,13 +342,7 @@ export default {
                 
                 if (value.endsWith("m")) {
                     const amount = parseInt(value);
-                    if (value === "6m") {
-                        // 6 months
-                        from = new Date(now.getTime() - 6 * 30 * 24 * 60 * 60 * 1000);
-                    } else {
-                        // minutes
-                        from = new Date(now.getTime() - amount * 60 * 1000);
-                    }
+                    from = new Date(now.getTime() - amount * 60 * 1000);
                 } else if (value.endsWith("h")) {
                     const hours = parseInt(value);
                     from = new Date(now.getTime() - hours * 60 * 60 * 1000);
