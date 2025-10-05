@@ -247,7 +247,6 @@ export default {
         this.$watch(() => this.$root.heartbeatList[this.monitorId],
             (heartbeatList) => {
 
-                log.debug("ping_chart", `this.chartPeriodHrs type ${typeof this.chartPeriodHrs}, value: ${this.chartPeriodHrs}`);
 
                 // eslint-disable-next-line eqeqeq
                 if (this.chartPeriodHrs != "0") {
