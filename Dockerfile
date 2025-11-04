@@ -38,7 +38,7 @@ RUN npm ci \
     && npm install pm2 -g \
     && pm2 install pm2-logrotate 
 
-RUN /app/kuma.db /app/db/kuma.db
+#COPY /app/kuma.db /app/db/kuma.db
 
 EXPOSE 3001
 VOLUME ["/app/data"]
