@@ -38,8 +38,6 @@ RUN npm ci \
     && npm install pm2 -g \
     && pm2 install pm2-logrotate 
 
-RUN /app/kuma.db /app/db/kuma.db
-
 EXPOSE 3001
 VOLUME ["/app/data"]
 HEALTHCHECK --interval=60s --timeout=30s --start-period=180s --retries=5 CMD extra/healthcheck
