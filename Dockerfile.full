@@ -1,5 +1,6 @@
 # Full-featured Dockerfile for Uptime Kuma 2.0.2a
 # Includes Chromium for screenshots and all features
+# RUNN docker build -f Dockerfile.full -t uptime-kuma:2.0.2a-full --target production .
 
 ############################################
 # Build Stage
