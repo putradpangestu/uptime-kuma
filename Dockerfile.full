@@ -1,0 +1,62 @@
+# Full-featured Dockerfile for Uptime Kuma 2.0.2a
+# Includes Chromium for screenshots and all features
+
+############################################
+# Build Stage
+############################################
+FROM louislam/uptime-kuma:base2 AS build
+
+USER node
+WORKDIR /app
+
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=1
+
+# Copy package files
+COPY --chown=node:node package.json package-lock.json ./
+
+# Install all dependencies
+RUN npm ci --legacy-peer-deps
+
+# Copy source code
+COPY --chown=node:node . .
+
+# Build frontend
+RUN npm run build
+
+# Remove dev dependencies
+RUN npm prune --production --legacy-peer-deps
+
+# Create data directory
+RUN mkdir -p ./data
+
+############################################
+# Production Image
+############################################
+FROM louislam/uptime-kuma:base2 AS production
+
+WORKDIR /app
+
+LABEL org.opencontainers.image.source="https://github.com/putradpangestu/uptime-kuma"
+LABEL org.opencontainers.image.version="2.0.2a"
+LABEL org.opencontainers.image.description="Uptime Kuma 2.0.2a with custom time range and mark as maintenance features"
+
+ENV UPTIME_KUMA_IS_CONTAINER=1
+ENV NODE_ENV=production
+
+# Copy built app from build stage
+COPY --chown=node:node --from=build /app /app
+
+EXPOSE 3001
+
+# Health check using the built-in healthcheck binary
+HEALTHCHECK --interval=60s --timeout=30s --start-period=180s --retries=5 \
+    CMD extra/healthcheck || exit 1
+
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+CMD ["node", "server/server.js"]
+
+############################################
+# Rootless variant (recommended for production)
+############################################
+FROM production AS rootless
+USER node
