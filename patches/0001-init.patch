@@ -1,0 +1,1141 @@
+From 90254890bb25d9429f3dafd9e491de47d7fc7b47 Mon Sep 17 00:00:00 2001
+From: root <putra.d.pangestu@gdplabs.id>
+Date: Wed, 10 Dec 2025 15:17:01 +0700
+Subject: [PATCH 1/4] init
+
+---
+ server/server.js                     | 167 ++++++-
+ src/components/TimeRangeSelector.vue | 674 +++++++++++++++++++++++++++
+ src/lang/en.json                     |  19 +
+ src/pages/Details.vue                | 160 ++++++-
+ 4 files changed, 1018 insertions(+), 2 deletions(-)
+ create mode 100644 src/components/TimeRangeSelector.vue
+
+diff --git a/server/server.js b/server/server.js
+index 55289b55..c09ab6ff 100644
+--- a/server/server.js
++++ b/server/server.js
+@@ -132,7 +132,7 @@ const twoFAVerifyOptions = {
+ const testMode = !!args["test"] || false;
+ 
+ // Must be after io instantiation
+-const { sendNotificationList, sendHeartbeatList, sendInfo, sendProxyList, sendDockerHostList, sendAPIKeyList, sendRemoteBrowserList, sendMonitorTypeList } = require("./client");
++const { sendNotificationList, sendHeartbeatList, sendImportantHeartbeatList, sendInfo, sendProxyList, sendDockerHostList, sendAPIKeyList, sendRemoteBrowserList, sendMonitorTypeList } = require("./client");
+ const { statusPageSocketHandler } = require("./socket-handlers/status-page-socket-handler");
+ const { databaseSocketHandler } = require("./socket-handlers/database-socket-handler");
+ const { remoteBrowserSocketHandler } = require("./socket-handlers/remote-browser-socket-handler");
+@@ -1557,6 +1557,171 @@ let needSetup = false;
+             }
+         });
+ 
++        // Mark a downtime period as maintenance
++        socket.on("markHeartbeatAsMaintenance", async (monitorID, heartbeatTime, callback) => {
++            try {
++                checkLogin(socket);
++
++                log.info("manage", `Mark Heartbeat as Maintenance: Monitor ${monitorID}, Time: ${heartbeatTime} User ID: ${socket.userID}`);
++
++                // Verify the user owns this monitor
++                await checkOwner(socket.userID, monitorID);
++
++                // Check if the heartbeat exists and is a DOWN status
++                const heartbeat = await R.getRow(`
++                    SELECT * FROM heartbeat
++                    WHERE monitor_id = ? AND time = ?
++                `, [ monitorID, heartbeatTime ]);
++
++                if (!heartbeat) {
++                    callback({
++                        ok: false,
++                        msg: "Heartbeat not found",
++                    });
++                    return;
++                }
++
++                // Find the start of this downtime period (last UP before the clicked heartbeat)
++                const lastUpBefore = await R.getRow(`
++                    SELECT * FROM heartbeat
++                    WHERE monitor_id = ? AND time < ? AND status = 1
++                    ORDER BY time DESC LIMIT 1
++                `, [ monitorID, heartbeatTime ]);
++
++                // Find the end of this downtime period (first UP after the clicked heartbeat)
++                const firstUpAfter = await R.getRow(`
++                    SELECT * FROM heartbeat
++                    WHERE monitor_id = ? AND time > ? AND status = 1
++                    ORDER BY time ASC LIMIT 1
++                `, [ monitorID, heartbeatTime ]);
++
++                // Determine the range to update
++                let startTime = lastUpBefore ? lastUpBefore.time : null;
++                let endTime = firstUpAfter ? firstUpAfter.time : null;
++
++                log.info("manage", `Updating heartbeats from ${startTime || "beginning"} to ${endTime || "end"} ${endTime ? "(exclusive)" : ""}`);
++
++                // Update all DOWN heartbeats in this downtime period
++                let updateQuery;
++                let updateParams;
++
++                if (startTime && endTime) {
++                    // Update between last UP and next UP
++                    updateQuery = "UPDATE heartbeat SET status = ? WHERE monitor_id = ? AND time > ? AND time < ? AND status = 0";
++                    updateParams = [ 3, monitorID, startTime, endTime ];
++                } else if (startTime) {
++                    // Update from after last UP to end
++                    updateQuery = "UPDATE heartbeat SET status = ? WHERE monitor_id = ? AND time > ? AND status = 0";
++                    updateParams = [ 3, monitorID, startTime ];
++                } else if (endTime) {
++                    // Update from beginning to before next UP
++                    updateQuery = "UPDATE heartbeat SET status = ? WHERE monitor_id = ? AND time < ? AND status = 0";
++                    updateParams = [ 3, monitorID, endTime ];
++                } else {
++                    // Update all DOWN heartbeats for this monitor
++                    updateQuery = "UPDATE heartbeat SET status = ? WHERE monitor_id = ? AND status = 0";
++                    updateParams = [ 3, monitorID ];
++                }
++
++                try {
++                    await R.exec(updateQuery, updateParams);
++                } catch (sqlError) {
++                    log.error("manage", `SQL Error: ${sqlError.message}`);
++                    throw sqlError;
++                }
++
++                // Send updated heartbeat list to all clients
++                await sendHeartbeatList(socket, monitorID, true, true);
++                await sendImportantHeartbeatList(socket, monitorID, true, true);
++
++                callback({
++                    ok: true,
++                    msg: "Downtime period has been marked as maintenance.",
++                });
++
++            } catch (e) {
++                callback({
++                    ok: false,
++                    msg: e.message,
++                });
++            }
++        });
++
++        // Get custom range uptime calculation
++        socket.on("getCustomRangeUptime", async (monitorID, fromTime, toTime, callback) => {
++            try {
++                checkLogin(socket);
++
++                const startTime = Date.now();
++                log.debug("server", `Calculating custom range uptime for monitor ${monitorID} from ${fromTime} to ${toTime}`);
++
++                // Convert client timestamps to UTC (database uses UTC)
++                const startTimeUTC = new Date(fromTime).toISOString().slice(0, 19).replace("T", " ");
++                const endTimeUTC = new Date(toTime).toISOString().slice(0, 19).replace("T", " ");
++
++                // Pre-calculate the time window in seconds to avoid JULIANDAY() in query
++                const timeWindowSeconds = (new Date(toTime) - new Date(fromTime)) / 1000;
++
++                const queryStartTime = Date.now();
++
++                // Optimized query: avoid JULIANDAY() calculations on every row
++                let result = await R.getRow(`
++                    SELECT
++                        SUM(
++                            CASE
++                                WHEN duration > ? THEN ?
++                                ELSE duration
++                            END
++                        ) AS total_duration,
++                        SUM(
++                            CASE
++                                WHEN (status = 1 OR status = 3) THEN
++                                    CASE
++                                        WHEN duration > ? THEN ?
++                                        ELSE duration
++                                    END
++                                ELSE 0
++                            END
++                        ) AS uptime_duration
++                    FROM heartbeat
++                    WHERE time >= ? AND time <= ? AND monitor_id = ?
++                `, [
++                    timeWindowSeconds, timeWindowSeconds,
++                    timeWindowSeconds, timeWindowSeconds,
++                    startTimeUTC, endTimeUTC, monitorID
++                ]);
++
++                const queryDuration = Date.now() - queryStartTime;
++
++                let totalDuration = result.total_duration || 0;
++                let uptimeDuration = result.uptime_duration || 0;
++                let uptime = 0;
++
++                if (totalDuration > 0) {
++                    uptime = uptimeDuration / totalDuration;
++                    if (uptime < 0) {
++                        uptime = 0;
++                    }
++                }
++
++                const totalDurationMs = Date.now() - startTime;
++
++                log.info("server", `Custom range uptime calculated: ${(uptime * 100).toFixed(2)}% | Query: ${queryDuration}ms | Total: ${totalDurationMs}ms | Monitor: ${monitorID}`);
++
++                callback({
++                    ok: true,
++                    uptime: uptime
++                });
++
++            } catch (e) {
++                log.error("server", `Error calculating custom range uptime: ${e.message}`);
++                callback({
++                    ok: false,
++                    msg: e.message,
++                });
++            }
++        });
++
+         socket.on("clearStatistics", async (callback) => {
+             try {
+                 checkLogin(socket);
+diff --git a/src/components/TimeRangeSelector.vue b/src/components/TimeRangeSelector.vue
+new file mode 100644
+index 00000000..8022e249
+--- /dev/null
++++ b/src/components/TimeRangeSelector.vue
+@@ -0,0 +1,674 @@
++<template>
++    <div class="time-range-selector">
++        <div class="dropdown">
++            <button 
++                class="btn btn-outline-secondary btn-sm dropdown-toggle" 
++                type="button" 
++                data-bs-toggle="dropdown" 
++                aria-expanded="false"
++            >
++                {{ selectedRangeLabel }}
++            </button>
++            <ul class="dropdown-menu">
++                <li>
++                    <div class="px-2 py-1" @click.stop>
++                        <!-- Custom Range Section -->
++                        <div class="mb-3">
++                            <h6 class="custom-range-header mb-2">{{ $t("Custom Range") }}</h6>
++                            
++                            <!-- Date inputs with better styling -->
++                            <div class="date-inputs">
++                                <div class="mb-2">
++                                    <label class="form-label-sm mb-1">{{ $t("From") }}:</label>
++                                    <div class="date-input-wrapper">
++                                        <input 
++                                            v-model="customFrom" 
++                                            type="datetime-local" 
++                                            class="form-control form-control-sm date-input"
++                                            :max="getCurrentDateTime()"
++                                            placeholder="Select date and time"
++                                            @change="updateCustomRange"
++                                            @focus="onDateInputFocus"
++                                        >
++                                    </div>
++                                </div>
++                                <div class="mb-2">
++                                    <label class="form-label-sm mb-1">{{ $t("To") }}:</label>
++                                    <div class="date-input-wrapper">
++                                        <input 
++                                            v-model="customTo" 
++                                            type="datetime-local" 
++                                            class="form-control form-control-sm date-input"
++                                            :min="customFrom"
++                                            :max="getCurrentDateTime()"
++                                            placeholder="Select date and time"
++                                            @change="updateCustomRange"
++                                            @focus="onDateInputFocus"
++                                        >
++                                    </div>
++                                </div>
++                            </div>
++                            
++                            <!-- Enhanced range info -->
++                            <div v-if="customRangeInfo" class="range-info">
++                                <div class="d-flex align-items-center">
++                                    <small class="text-muted duration-text">{{ customRangeInfo }}</small>
++                                </div>
++                            </div>
++                            
++                            <!-- Validation error message -->
++                            <div v-if="showValidationError" class="validation-error mt-1 mb-2">
++                                <small class="text-danger"><i class="fas fa-exclamation-circle me-1"></i>{{ $t("Date and time cannot be in the future") }}</small>
++                            </div>
++                            
++                            <!-- Apply button for custom range -->
++                            <div v-if="customFrom && customTo" class="mt-1">
++                                <button 
++                                    type="button" 
++                                    class="btn btn-sm w-100 apply-btn"
++                                    @click="applyCustomRange"
++                                    style="background-color: #5cdd8b; border-color: #5cdd8b; color: white;"
++                                >
++                                    <i class="fas fa-check me-1"></i><span class="apply-text">{{ $t("Apply Custom Range") }}</span>
++                                </button>
++                            </div>
++                        </div>
++                        
++                        <!-- Quick Ranges Section -->
++                        <div>
++                            <h6 class="quick-ranges-header mb-2">{{ $t("Quick Ranges") }}</h6>
++                            <div class="quick-ranges-grid">
++                                <button 
++                                    v-for="range in quickRanges" 
++                                    :key="range.value"
++                                    type="button" 
++                                    class="btn btn-sm quick-range-btn"
++                                    :class="{ 'active': selectedRange === range.value }"
++                                    @click="selectRange(range.value, range.label)"
++                                >
++                                    {{ range.label }}
++                                </button>
++                            </div>
++                        </div>
++                    </div>
++                </li>
++            </ul>
++        </div>
++    </div>
++</template>
++
++<script>
++export default {
++    name: "TimeRangeSelector",
++    emits: [ "range-changed" ],
++    data() {
++        return {
++            selectedRange: "5m",
++            selectedRangeLabel: this.$t("Last 5 minutes"),
++            customFrom: "",
++            customTo: "",
++            showValidationError: false,
++            quickRanges: [
++                { value: "5m", label: this.$t("Last 5 minutes") },
++                { value: "1h", label: this.$t("Last 1 hour") },
++                { value: "24h", label: this.$t("Last 24 hours") },
++                { value: "7d", label: this.$t("Last 7 days") },
++                { value: "30d", label: this.$t("Last 30 days") },
++                { value: "180d", label: this.$t("Last 6 months") }
++            ]
++        };
++    },
++    computed: {
++        customRangeInfo() {
++            if (!this.customFrom || !this.customTo) {
++                return null;
++            }
++            
++            const from = new Date(this.customFrom);
++            const to = new Date(this.customTo);
++            const diffMs = to - from;
++            
++            if (diffMs <= 0) {
++                return this.$t("Invalid range");
++            }
++            
++            const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
++            const diffHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
++            const diffMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
++            
++            if (diffDays > 0) {
++                return `${this.$t("Duration")}: ${diffDays}d ${diffHours}h ${diffMinutes}m`;
++            } else if (diffHours > 0) {
++                return `${this.$t("Duration")}: ${diffHours}h ${diffMinutes}m`;
++            } else {
++                return `${this.$t("Duration")}: ${diffMinutes}m`;
++            }
++        }
++    },
++    mounted() {
++        this.initializeCustomDates();
++    },
++    methods: {
++        selectRange(value, label) {
++            this.selectedRange = value;
++            this.selectedRangeLabel = label;
++            // Clear any validation errors when selecting a quick range
++            this.showValidationError = false;
++            // Clear custom range inputs when selecting quick ranges
++            this.customFrom = "";
++            this.customTo = "";
++            
++            this.emitRangeChange();
++            // Close dropdown after selecting quick range
++            const dropdown = this.$el.querySelector(".dropdown-toggle");
++            if (dropdown) {
++                dropdown.click();
++            }
++        },
++        
++        updateCustomRange() {
++            if (this.customFrom && this.customTo) {
++                const from = new Date(this.customFrom);
++                const to = new Date(this.customTo);
++                const now = new Date();
++                
++                // Clear validation error when user makes changes
++                this.showValidationError = false;
++                
++                if (from >= to) {
++                    // Auto-adjust if from is after to
++                    this.customTo = this.formatDateTimeLocal(new Date(from.getTime() + 60 * 60 * 1000)); // Add 1 hour
++                }
++                
++                // Check if dates are in the future
++                if (from > now || to > now) {
++                    // Just show the validation message but don't prevent editing
++                    this.showValidationError = true;
++                }
++            }
++        },
++
++        applyCustomRange() {
++            if (this.customFrom && this.customTo) {
++                const from = new Date(this.customFrom);
++                const to = new Date(this.customTo);
++                const now = new Date();
++                
++                // Validate that dates are not in the future
++                if (from > now || to > now) {
++                    // Show error message
++                    this.showValidationError = true;
++                    return;
++                }
++                
++                // Clear any validation errors
++                this.showValidationError = false;
++                
++                this.selectedRange = "custom";
++                this.selectedRangeLabel = this.formatCustomRangeLabel(from, to);
++                this.emitRangeChange();
++                
++                // Close dropdown after applying
++                const dropdown = this.$el.querySelector(".dropdown-toggle");
++                if (dropdown) {
++                    dropdown.click();
++                }
++            }
++        },
++        
++        getCurrentDateTime() {
++            return this.formatDateTimeLocal(new Date());
++        },
++
++        setQuickCustomRange(preset) {
++            const now = new Date();
++            let from, to;
++            
++            // Clear any validation errors
++            this.showValidationError = false;
++            
++            switch (preset) {
++                case "today":
++                    from = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0);
++                    to = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59);
++                    break;
++                case "yesterday": {
++                    const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
++                    from = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate(), 0, 0);
++                    to = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate(), 23, 59);
++                    break;
++                }
++                case "thisWeek": {
++                    const startOfWeek = new Date(now);
++                    startOfWeek.setDate(now.getDate() - now.getDay());
++                    startOfWeek.setHours(0, 0, 0, 0);
++                    from = startOfWeek;
++                    to = now;
++                    break;
++                }
++            }
++            
++            this.customFrom = this.formatDateTimeLocal(from);
++            this.customTo = this.formatDateTimeLocal(to);
++            this.updateCustomRange();
++        },
++
++        onDateInputFocus() {
++            // Add visual feedback when user focuses on date inputs
++        },
++
++        setCustomPreset(preset) {
++            const now = new Date();
++            let from, to;
++            
++            switch (preset) {
++                case "yesterday":
++                    from = new Date(now);
++                    from.setDate(now.getDate() - 1);
++                    from.setHours(0, 0, 0, 0);
++                    to = new Date(from);
++                    to.setHours(23, 59, 59, 999);
++                    break;
++                    
++                case "thisWeek":
++                    from = new Date(now);
++                    from.setDate(now.getDate() - now.getDay()); // Start of week (Sunday)
++                    from.setHours(0, 0, 0, 0);
++                    to = new Date(now);
++                    break;
++                    
++                case "lastWeek":
++                    from = new Date(now);
++                    from.setDate(now.getDate() - now.getDay() - 7); // Start of last week
++                    from.setHours(0, 0, 0, 0);
++                    to = new Date(from);
++                    to.setDate(from.getDate() + 6); // End of last week
++                    to.setHours(23, 59, 59, 999);
++                    break;
++            }
++            
++            this.customFrom = this.formatDateTimeLocal(from);
++            this.customTo = this.formatDateTimeLocal(to);
++            this.updateCustomRange();
++        },
++        
++        initializeCustomDates() {
++            // Keep custom range fields empty on first load
++            this.customTo = "";
++            this.customFrom = "";
++            // Clear any validation errors
++            this.showValidationError = false;
++        },
++        
++        formatDateTimeLocal(date) {
++            const year = date.getFullYear();
++            const month = String(date.getMonth() + 1).padStart(2, "0");
++            const day = String(date.getDate()).padStart(2, "0");
++            const hours = String(date.getHours()).padStart(2, "0");
++            const minutes = String(date.getMinutes()).padStart(2, "0");
++            
++            return `${year}-${month}-${day}T${hours}:${minutes}`;
++        },
++
++        formatCustomRangeLabel(from, to) {
++            const formatDate = (date, includeYear = false) => {
++                const day = String(date.getDate()).padStart(2, "0");
++                const month = date.toLocaleDateString("en-US", { month: "short" });
++                const year = includeYear ? ` ${date.getFullYear()}` : "";
++                const time = date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
++                
++                // If same day, show only time for 'to' date
++                if (from.toDateString() === to.toDateString()) {
++                    if (date === from) {
++                        return `${day} ${month}${year}, ${time}`;
++                    } else {
++                        return time;
++                    }
++                }
++                
++                return `${day} ${month}${year}, ${time}`;
++            };
++            
++            // Check if years are different
++            const differentYears = from.getFullYear() !== to.getFullYear();
++            
++            return `${formatDate(from, differentYears)} - ${formatDate(to, differentYears)}`;
++        },
++        
++        emitRangeChange() {
++            let from, to;
++            const now = new Date();
++            
++            if (this.selectedRange === "custom") {
++                from = new Date(this.customFrom);
++                to = new Date(this.customTo);
++            } else {
++                to = now;
++                const value = this.selectedRange;
++                
++                if (value.endsWith("m")) {
++                    const amount = parseInt(value);
++                    from = new Date(now.getTime() - amount * 60 * 1000);
++                } else if (value.endsWith("h")) {
++                    const hours = parseInt(value);
++                    from = new Date(now.getTime() - hours * 60 * 60 * 1000);
++                } else if (value.endsWith("d")) {
++                    const days = parseInt(value);
++                    from = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
++                }
++            }
++            
++            this.$emit("range-changed", {
++                range: this.selectedRange,
++                from: from,
++                to: to
++            });
++        },
++        
++        calculateFromTime(range, now) {
++            const multipliers = {
++                m: 60 * 1000,           // minutes
++                h: 60 * 60 * 1000,      // hours  
++                d: 24 * 60 * 60 * 1000  // days
++            };
++            
++            const match = range.match(/^(\d+)([mhd])$/);
++            if (!match) {
++                return new Date(now.getTime() - 24 * 60 * 60 * 1000);
++            } // default 24h
++            
++            const [ , amount, unit ] = match;
++            const milliseconds = parseInt(amount) * multipliers[unit];
++            
++            return new Date(now.getTime() - milliseconds);
++        }
++    }
++};
++</script>
++
++<style scoped>
++.time-range-selector {
++    display: inline-block;
++}
++
++.dropdown-item.active {
++    background-color: var(--bs-primary);
++    color: white;
++}
++
++.dropdown-menu {
++    min-width: 280px;
++    padding: 0.75rem 0.5rem;
++    border: 1px solid rgba(0, 0, 0, 0.05);
++    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
++    border-radius: 8px;
++}
++
++.form-control-sm {
++    font-size: 0.75rem;
++}
++
++.form-label-sm {
++    font-size: 0.7rem;
++    font-weight: 400;
++    color: var(--bs-gray-600);
++    margin-bottom: 0.2rem;
++}
++
++.btn-group .btn-sm {
++    font-size: 0.7rem;
++    padding: 0.25rem 0.5rem;
++}
++
++.dropdown-item {
++    font-size: 0.875rem;
++}
++
++.custom-range-header,
++.quick-ranges-header {
++    font-size: 0.7rem;
++    font-weight: 500;
++    color: var(--bs-gray-600);
++    margin-bottom: 0.5rem;
++    padding-bottom: 0.25rem;
++    display: inline-block;
++    border-bottom: 1px solid #5cdd8b; /* Thinner line for minimalist look */
++    text-transform: uppercase;
++    letter-spacing: 0.03rem;
++}
++
++.quick-ranges-grid {
++    display: grid;
++    grid-template-columns: 1fr 1fr;
++    gap: 0.4rem;
++    margin-bottom: 0.25rem;
++}
++
++.quick-range-btn {
++    background: var(--bs-body-bg);
++    border: 1px solid var(--bs-gray-200);
++    color: var(--bs-gray-600);
++    font-size: 0.7rem;
++    padding: 0.25rem 0.375rem;
++    text-align: center;
++    transition: all 0.2s ease;
++    border-radius: 6px;
++    outline: none;
++    position: relative;
++    overflow: hidden;
++    box-shadow: none;
++}
++
++.quick-range-btn::after {
++    content: '';
++    position: absolute;
++    top: 0;
++    left: 0;
++    width: 100%;
++    height: 100%;
++    background: rgba(92, 221, 139, 0.05);
++    transform: translateX(-100%);
++    transition: transform 0.25s ease;
++}
++
++.quick-range-btn:hover::after {
++    transform: translateX(0);
++}
++
++.quick-range-btn:hover {
++    background: #f8fdfb; /* very light green */
++    border-color: #5cdd8b;
++    color: #198754; /* bootstrap success color */
++    box-shadow: none;
++    transform: none;
++}
++
++.quick-range-btn.active {
++    background: #5cdd8b; /* primary heartbeat color */
++    border-color: #5cdd8b;
++    color: white;
++    box-shadow: none;
++}
++
++.quick-range-btn.active:hover {
++    background: #4bc77a; /* slightly darker primary for hover */
++    border-color: #4bc77a;
++    color: white;
++    box-shadow: none;
++}
++
++.preset-buttons {
++    display: flex;
++    gap: 0.5rem;
++    flex-wrap: wrap;
++}
++
++.preset-btn {
++    flex: 1;
++    min-width: 70px;
++    font-size: 0.7rem;
++    padding: 0.25rem 0.5rem;
++    border-radius: 0.375rem;
++    transition: all 0.2s ease;
++}
++
++.preset-btn:hover {
++    transform: translateY(-1px);
++    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
++}
++
++.input-label {
++    background: var(--bs-light);
++    border-color: var(--bs-border-color);
++    font-size: 0.75rem;
++    font-weight: 500;
++    min-width: 70px;
++}
++
++.date-input-wrapper {
++    position: relative;
++    display: flex;
++    align-items: center;
++}
++
++.date-input {
++    font-size: 0.75rem;
++    transition: all 0.2s ease;
++    border: 1px solid var(--bs-gray-300);
++    background: var(--bs-body-bg);
++    border-radius: 4px;
++    padding: 0.25rem 0.4rem;
++    box-shadow: none;
++    width: 100%;
++    font-family: var(--bs-font-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif);
++    color: var(--bs-gray-700);
++    letter-spacing: normal;
++    text-align: left;
++    font-weight: 400;
++    height: auto;
++}
++
++.date-input::-webkit-calendar-picker-indicator {
++    padding: 0;
++    margin: 0;
++    width: 16px;
++    height: 16px;
++    opacity: 0.7;
++    cursor: pointer;
++    filter: invert(60%) sepia(89%) saturate(387%) hue-rotate(93deg) brightness(95%) contrast(85%);
++}
++
++.date-input::-webkit-datetime-edit {
++    padding: 0;
++    text-align: left;
++}
++
++/* Fix date input symmetry */
++.date-input::-webkit-datetime-edit-fields-wrapper {
++    display: inline-flex;
++    align-items: center;
++    width: 100%;
++    gap: 0;
++}
++
++.date-input::-webkit-datetime-edit-text {
++    padding: 0;
++    color: var(--bs-gray-600);
++}
++
++.date-input::-webkit-datetime-edit-day-field,
++.date-input::-webkit-datetime-edit-month-field,
++.date-input::-webkit-datetime-edit-year-field,
++.date-input::-webkit-datetime-edit-hour-field,
++.date-input::-webkit-datetime-edit-minute-field {
++    padding: 0;
++    min-width: 1em;
++    display: inline-block;
++    font-weight: normal;
++    font-size: 0.75rem;
++}
++
++.date-input:focus {
++    border-color: #5cdd8b;
++    box-shadow: 0 0 0 1px rgba(92, 221, 139, 0.2);
++    background: var(--bs-body-bg);
++    outline: none;
++}
++
++.range-info {
++    background: rgba(92, 221, 139, 0.03);
++    border-radius: 4px;
++    padding: 0.35rem 0.5rem;
++    margin: 0.5rem 0;
++    border: none;
++}
++
++.validation-error {
++    background-color: rgba(220, 53, 69, 0.05);
++    border-radius: 4px;
++    padding: 0.35rem 0.5rem;
++    text-align: center;
++    font-size: 0.75rem;
++}
++
++.format-hint {
++    display: block;
++    font-size: 0.65rem;
++    color: var(--bs-gray-500);
++    margin-top: -0.1rem;
++    margin-bottom: 0.2rem;
++}
++
++.duration-text {
++    font-size: 0.75rem;
++    font-weight: 400;
++}
++
++.apply-btn {
++    border-radius: 6px;
++    font-weight: 500;
++    transition: all 0.2s ease;
++    position: relative;
++    overflow: hidden;
++    height: 32px;
++}
++
++.apply-btn::after {
++    content: '';
++    position: absolute;
++    top: 0;
++    left: 0;
++    width: 100%;
++    height: 100%;
++    background: rgba(255, 255, 255, 0.1);
++    transform: translateX(-100%);
++    transition: transform 0.25s ease;
++}
++
++.apply-btn:hover::after {
++    transform: translateX(0);
++}
++
++.apply-text {
++    font-size: 0.7rem;
++    font-weight: 500;
++    letter-spacing: 0.01rem;
++    text-rendering: optimizeLegibility;
++    -webkit-font-smoothing: antialiased;
++}
++
++.apply-btn:hover {
++    transform: none;
++    background-color: #4bc77a; /* slightly darker primary for hover */
++    border-color: #4bc77a;
++    color: #fff;
++    box-shadow: none;
++}
++
++.quick-ranges-grid .quick-range-btn {
++    border-radius: 6px;
++    font-weight: 400;
++}
++
++/* Remove this rule as it's overriding our main hover styles */
++</style>
+diff --git a/src/lang/en.json b/src/lang/en.json
+index 8c969026..792e60d5 100644
+--- a/src/lang/en.json
++++ b/src/lang/en.json
+@@ -134,6 +134,25 @@
+     "Confirm": "Confirm",
+     "Yes": "Yes",
+     "No": "No",
++    "Mark as Maintenance": "Mark as Maintenance",
++    "Are you sure you want to mark this downtime period as maintenance?": "Are you sure you want to mark this downtime period as maintenance?",
++    "Downtime period marked as maintenance": "Downtime period marked as maintenance",
++    "Failed to mark as maintenance": "Failed to mark as maintenance",
++    "Custom Range": "Custom Range",
++    "Quick Ranges": "Quick Ranges",
++    "Apply Custom Range": "Apply Custom Range",
++    "Date and time cannot be in the future": "Date and time cannot be in the future",
++    "Invalid range": "Invalid range",
++    "Duration": "Duration",
++    "Last 5 minutes": "Last 5 minutes",
++    "Last 1 hour": "Last 1 hour",
++    "Last 24 hours": "Last 24 hours",
++    "Last 7 days": "Last 7 days",
++    "Last 30 days": "Last 30 days",
++    "Last 6 months": "Last 6 months",
++    "From": "From",
++    "To": "To",
++    "Actions": "Actions",
+     "Username": "Username",
+     "Password": "Password",
+     "Remember me": "Remember me",
+diff --git a/src/pages/Details.vue b/src/pages/Details.vue
+index 0ba0a44e..2f9c0cc8 100644
+--- a/src/pages/Details.vue
++++ b/src/pages/Details.vue
+@@ -282,6 +282,19 @@
+                         </span>
+                     </div>
+ 
++                    <!-- Uptime (Custom Time Range) -->
++                    <div
++                        class="col-12 col-sm col row d-flex align-items-center d-sm-block"
++                    >
++                        <h4 class="col-4 col-sm-12">{{ $t("Uptime") }}</h4>
++                        <p class="col-4 col-sm-12 mb-0 mb-sm-2">
++                            <TimeRangeSelector @range-changed="onTimeRangeChanged" />
++                        </p>
++                        <span class="col-4 col-sm-12 num">
++                            {{ timeRangeUptime }}%
++                        </span>
++                    </div>
++
+                     <div
+                         v-if="tlsInfo"
+                         class="col-12 col-sm col row d-flex align-items-center d-sm-block"
+@@ -392,6 +405,7 @@
+                             <th>{{ $t("Status") }}</th>
+                             <th>{{ $t("DateTime") }}</th>
+                             <th>{{ $t("Message") }}</th>
++                            <th width="120">{{ $t("Actions") }}</th>
+                         </tr>
+                     </thead>
+                     <tbody>
+@@ -405,10 +419,20 @@
+                                 <Datetime :value="beat.time" />
+                             </td>
+                             <td class="border-0">{{ beat.msg }}</td>
++                            <td class="border-0">
++                                <button
++                                    v-if="beat.status === 0 && lastHeartBeat.status !== 0"
++                                    class="btn btn-sm btn-outline-warning"
++                                    :title="$t('Mark as Maintenance')"
++                                    @click="markHeartbeatAsMaintenance(beat)"
++                                >
++                                    <font-awesome-icon icon="wrench" />
++                                </button>
++                            </td>
+                         </tr>
+ 
+                         <tr v-if="importantHeartBeatListLength === 0">
+-                            <td colspan="3">
++                            <td colspan="4">
+                                 {{ $t("No important events") }}
+                             </td>
+                         </tr>
+@@ -463,6 +487,16 @@
+             >
+                 {{ $t("clearHeartbeatsMsg") }}
+             </Confirm>
++
++            <Confirm
++                ref="confirmMarkHeartbeatMaintenance"
++                btn-style="btn-warning"
++                :yes-text="$t('Yes')"
++                :no-text="$t('No')"
++                @yes="confirmMarkHeartbeatAsMaintenance"
++            >
++                {{ $t("Are you sure you want to mark this downtime period as maintenance?") }}
++            </Confirm>
+         </div>
+     </transition>
+ </template>
+@@ -477,6 +511,7 @@ import Status from "../components/Status.vue";
+ import Datetime from "../components/Datetime.vue";
+ import CountUp from "../components/CountUp.vue";
+ import Uptime from "../components/Uptime.vue";
++import TimeRangeSelector from "../components/TimeRangeSelector.vue";
+ import Pagination from "v-pagination-3";
+ const PingChart = defineAsyncComponent(() =>
+     import("../components/PingChart.vue")
+@@ -502,6 +537,7 @@ export default {
+         CountUp,
+         Datetime,
+         HeartbeatBar,
++        TimeRangeSelector,
+         Confirm,
+         Status,
+         Pagination,
+@@ -530,6 +566,15 @@ export default {
+                 currentExample: "javascript-fetch",
+                 code: "",
+             },
++            timeRange: {
++                from: new Date(Date.now() - 24 * 60 * 60 * 1000),
++                to: new Date(),
++                range: "24h",
++                label: "Last 24 hours"
++            },
++            selectedBeat: null,
++            customRangeUptime: null,
++            loadingCustomUptime: false,
+         };
+     },
+     computed: {
+@@ -629,6 +674,44 @@ export default {
+                 return "";
+             }
+         },
++
++        timeRangeUptime() {
++            // Use pre-calculated server data for standard ranges
++            if (this.timeRange.range === "24h") {
++                const key = this.monitor.id + "_24";
++                if (this.$root.uptimeList[key] !== undefined) {
++                    return Math.round(this.$root.uptimeList[key] * 100 * 100) / 100;
++                }
++            }
++
++            if (this.timeRange.range === "30d") {
++                const key = this.monitor.id + "_720";
++                if (this.$root.uptimeList[key] !== undefined) {
++                    return Math.round(this.$root.uptimeList[key] * 100 * 100) / 100;
++                }
++            }
++
++            // For custom ranges and short ranges, use server-calculated uptime
++            if (this.customRangeUptime !== null) {
++                return Math.round(this.customRangeUptime * 100 * 100) / 100;
++            }
++
++            // Loading state
++            if (this.loadingCustomUptime) {
++                return "...";
++            }
++
++            // Fallback to current status
++            if (this.lastHeartBeat && this.lastHeartBeat.status !== undefined) {
++                if (this.lastHeartBeat.status === 1 || this.lastHeartBeat.status === 3) {
++                    return 100.0;
++                } else {
++                    return 0.0;
++                }
++            }
++
++            return "N/A";
++        },
+     },
+ 
+     watch: {
+@@ -930,6 +1013,81 @@ export default {
+         secondsToHumanReadableFormat(seconds) {
+             return relativeTimeFormatter.secondsToHumanReadableFormat(seconds);
+         },
++
++        /**
++         * Show confirmation dialog for marking heartbeat as maintenance
++         * @param {object} beat - The heartbeat to mark
++         * @returns {void}
++         */
++        markHeartbeatAsMaintenance(beat) {
++            // Store the beat data for later use in confirmation
++            this.selectedBeat = beat;
++            this.$refs.confirmMarkHeartbeatMaintenance.show();
++        },
++
++        /**
++         * Actually mark the heartbeat as maintenance after confirmation
++         * @returns {void}
++         */
++        confirmMarkHeartbeatAsMaintenance() {
++            const beat = this.selectedBeat;
++            if (!beat) {
++                return;
++            }
++
++            // Convert Vue proxy to plain object and extract values
++            const plainBeat = JSON.parse(JSON.stringify(beat));
++            const timestamp = String(plainBeat.time);
++            const monitorId = Number(this.monitor.id);
++
++            this.$root.getSocket().emit("markHeartbeatAsMaintenance", monitorId, timestamp, (res) => {
++                if (res && res.ok) {
++                    toast.success(this.$t("Downtime period marked as maintenance"));
++                    // Refresh the heartbeat list
++                    this.getImportantHeartbeatListLength();
++                } else {
++                    toast.error(res?.msg || this.$t("Failed to mark as maintenance"));
++                }
++            });
++        },
++
++        /**
++         * Handle time range selection change
++         * @param {object} timeRange - The selected time range
++         * @returns {void}
++         */
++        onTimeRangeChanged(timeRange) {
++            this.timeRange = timeRange;
++
++            // For non-standard ranges, request server-side calculation
++            if (timeRange.range !== "24h" && timeRange.range !== "30d") {
++                this.requestCustomRangeUptime(timeRange);
++            } else {
++                // Clear custom uptime for standard ranges
++                this.customRangeUptime = null;
++                this.loadingCustomUptime = false;
++            }
++        },
++
++        /**
++         * Request server-side uptime calculation for custom/short ranges
++         * @param {object} timeRange - The time range to calculate
++         * @returns {void}
++         */
++        requestCustomRangeUptime(timeRange) {
++            this.loadingCustomUptime = true;
++            this.customRangeUptime = null;
++
++            this.$root.getSocket().emit("getCustomRangeUptime", this.monitor.id, timeRange.from, timeRange.to, (res) => {
++                this.loadingCustomUptime = false;
++
++                if (res.ok) {
++                    this.customRangeUptime = res.uptime;
++                } else {
++                    this.customRangeUptime = null;
++                }
++            });
++        },
+     },
+ };
+ </script>
+-- 
+2.39.5
+
