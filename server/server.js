@@ -1717,61 +1717,44 @@ let needSetup = false;
             try {
                 checkLogin(socket);
 
-                const startTime = Date.now();
-                log.debug("server", `Calculating custom range uptime for monitor ${monitorID} from ${fromTime} to ${toTime}`);
+                const calcStartTime = Date.now();
+                log.info("server", `getCustomRangeUptime called: monitor=${monitorID}, from=${fromTime}, to=${toTime}`);
 
                 // Convert client timestamps to UTC (database uses UTC)
                 const startTimeUTC = new Date(fromTime).toISOString().slice(0, 19).replace("T", " ");
                 const endTimeUTC = new Date(toTime).toISOString().slice(0, 19).replace("T", " ");
 
-                // Pre-calculate the time window in seconds to avoid JULIANDAY() in query
-                const timeWindowSeconds = (new Date(toTime) - new Date(fromTime)) / 1000;
+                log.info("server", `Converted to UTC: from=${startTimeUTC}, to=${endTimeUTC}`);
 
                 const queryStartTime = Date.now();
 
-                // Optimized query: avoid JULIANDAY() calculations on every row
+                // In v2.0.2, uptime is calculated by counting heartbeats, not by duration
+                // Status 1 = UP, Status 3 = MAINTENANCE (counts as UP)
+                // Status 0 = DOWN, Status 2 = PENDING (counts as DOWN)
                 let result = await R.getRow(`
                     SELECT
-                        SUM(
-                            CASE
-                                WHEN duration > ? THEN ?
-                                ELSE duration
-                            END
-                        ) AS total_duration,
-                        SUM(
-                            CASE
-                                WHEN (status = 1 OR status = 3) THEN
-                                    CASE
-                                        WHEN duration > ? THEN ?
-                                        ELSE duration
-                                    END
-                                ELSE 0
-                            END
-                        ) AS uptime_duration
+                        COUNT(*) AS total_count,
+                        SUM(CASE WHEN status = 1 OR status = 3 THEN 1 ELSE 0 END) AS up_count,
+                        SUM(CASE WHEN status = 0 OR status = 2 THEN 1 ELSE 0 END) AS down_count
                     FROM heartbeat
                     WHERE time >= ? AND time <= ? AND monitor_id = ?
-                `, [
-                    timeWindowSeconds, timeWindowSeconds,
-                    timeWindowSeconds, timeWindowSeconds,
-                    startTimeUTC, endTimeUTC, monitorID
-                ]);
+                `, [ startTimeUTC, endTimeUTC, monitorID ]);
+
+                log.info("server", `Query result: total=${result?.total_count}, up=${result?.up_count}, down=${result?.down_count}`);
 
                 const queryDuration = Date.now() - queryStartTime;
 
-                let totalDuration = result.total_duration || 0;
-                let uptimeDuration = result.uptime_duration || 0;
+                let totalCount = result ? (result.total_count || 0) : 0;
+                let upCount = result ? (result.up_count || 0) : 0;
                 let uptime = 0;
 
-                if (totalDuration > 0) {
-                    uptime = uptimeDuration / totalDuration;
-                    if (uptime < 0) {
-                        uptime = 0;
-                    }
+                if (totalCount > 0) {
+                    uptime = upCount / totalCount;
                 }
 
-                const totalDurationMs = Date.now() - startTime;
+                const totalDurationMs = Date.now() - calcStartTime;
 
-                log.info("server", `Custom range uptime calculated: ${(uptime * 100).toFixed(2)}% | Query: ${queryDuration}ms | Total: ${totalDurationMs}ms | Monitor: ${monitorID}`);
+                log.info("server", `Custom range uptime calculated: ${(uptime * 100).toFixed(2)}% (${upCount}/${totalCount}) | Query: ${queryDuration}ms | Total: ${totalDurationMs}ms | Monitor: ${monitorID}`);
 
                 callback({
                     ok: true,
