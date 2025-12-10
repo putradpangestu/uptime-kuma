@@ -132,7 +132,7 @@ const twoFAVerifyOptions = {
 const testMode = !!args["test"] || false;
 
 // Must be after io instantiation
-const { sendNotificationList, sendHeartbeatList, sendInfo, sendProxyList, sendDockerHostList, sendAPIKeyList, sendRemoteBrowserList, sendMonitorTypeList } = require("./client");
+const { sendNotificationList, sendHeartbeatList, sendImportantHeartbeatList, sendInfo, sendProxyList, sendDockerHostList, sendAPIKeyList, sendRemoteBrowserList, sendMonitorTypeList } = require("./client");
 const { statusPageSocketHandler } = require("./socket-handlers/status-page-socket-handler");
 const { databaseSocketHandler } = require("./socket-handlers/database-socket-handler");
 const { remoteBrowserSocketHandler } = require("./socket-handlers/remote-browser-socket-handler");
@@ -1550,6 +1550,171 @@ let needSetup = false;
                 });
 
             } catch (e) {
+                callback({
+                    ok: false,
+                    msg: e.message,
+                });
+            }
+        });
+
+        // Mark a downtime period as maintenance
+        socket.on("markHeartbeatAsMaintenance", async (monitorID, heartbeatTime, callback) => {
+            try {
+                checkLogin(socket);
+
+                log.info("manage", `Mark Heartbeat as Maintenance: Monitor ${monitorID}, Time: ${heartbeatTime} User ID: ${socket.userID}`);
+
+                // Verify the user owns this monitor
+                await checkOwner(socket.userID, monitorID);
+
+                // Check if the heartbeat exists and is a DOWN status
+                const heartbeat = await R.getRow(`
+                    SELECT * FROM heartbeat
+                    WHERE monitor_id = ? AND time = ?
+                `, [ monitorID, heartbeatTime ]);
+
+                if (!heartbeat) {
+                    callback({
+                        ok: false,
+                        msg: "Heartbeat not found",
+                    });
+                    return;
+                }
+
+                // Find the start of this downtime period (last UP before the clicked heartbeat)
+                const lastUpBefore = await R.getRow(`
+                    SELECT * FROM heartbeat
+                    WHERE monitor_id = ? AND time < ? AND status = 1
+                    ORDER BY time DESC LIMIT 1
+                `, [ monitorID, heartbeatTime ]);
+
+                // Find the end of this downtime period (first UP after the clicked heartbeat)
+                const firstUpAfter = await R.getRow(`
+                    SELECT * FROM heartbeat
+                    WHERE monitor_id = ? AND time > ? AND status = 1
+                    ORDER BY time ASC LIMIT 1
+                `, [ monitorID, heartbeatTime ]);
+
+                // Determine the range to update
+                let startTime = lastUpBefore ? lastUpBefore.time : null;
+                let endTime = firstUpAfter ? firstUpAfter.time : null;
+
+                log.info("manage", `Updating heartbeats from ${startTime || "beginning"} to ${endTime || "end"} ${endTime ? "(exclusive)" : ""}`);
+
+                // Update all DOWN heartbeats in this downtime period
+                let updateQuery;
+                let updateParams;
+
+                if (startTime && endTime) {
+                    // Update between last UP and next UP
+                    updateQuery = "UPDATE heartbeat SET status = ? WHERE monitor_id = ? AND time > ? AND time < ? AND status = 0";
+                    updateParams = [ 3, monitorID, startTime, endTime ];
+                } else if (startTime) {
+                    // Update from after last UP to end
+                    updateQuery = "UPDATE heartbeat SET status = ? WHERE monitor_id = ? AND time > ? AND status = 0";
+                    updateParams = [ 3, monitorID, startTime ];
+                } else if (endTime) {
+                    // Update from beginning to before next UP
+                    updateQuery = "UPDATE heartbeat SET status = ? WHERE monitor_id = ? AND time < ? AND status = 0";
+                    updateParams = [ 3, monitorID, endTime ];
+                } else {
+                    // Update all DOWN heartbeats for this monitor
+                    updateQuery = "UPDATE heartbeat SET status = ? WHERE monitor_id = ? AND status = 0";
+                    updateParams = [ 3, monitorID ];
+                }
+
+                try {
+                    await R.exec(updateQuery, updateParams);
+                } catch (sqlError) {
+                    log.error("manage", `SQL Error: ${sqlError.message}`);
+                    throw sqlError;
+                }
+
+                // Send updated heartbeat list to all clients
+                await sendHeartbeatList(socket, monitorID, true, true);
+                await sendImportantHeartbeatList(socket, monitorID, true, true);
+
+                callback({
+                    ok: true,
+                    msg: "Downtime period has been marked as maintenance.",
+                });
+
+            } catch (e) {
+                callback({
+                    ok: false,
+                    msg: e.message,
+                });
+            }
+        });
+
+        // Get custom range uptime calculation
+        socket.on("getCustomRangeUptime", async (monitorID, fromTime, toTime, callback) => {
+            try {
+                checkLogin(socket);
+
+                const startTime = Date.now();
+                log.debug("server", `Calculating custom range uptime for monitor ${monitorID} from ${fromTime} to ${toTime}`);
+
+                // Convert client timestamps to UTC (database uses UTC)
+                const startTimeUTC = new Date(fromTime).toISOString().slice(0, 19).replace("T", " ");
+                const endTimeUTC = new Date(toTime).toISOString().slice(0, 19).replace("T", " ");
+
+                // Pre-calculate the time window in seconds to avoid JULIANDAY() in query
+                const timeWindowSeconds = (new Date(toTime) - new Date(fromTime)) / 1000;
+
+                const queryStartTime = Date.now();
+
+                // Optimized query: avoid JULIANDAY() calculations on every row
+                let result = await R.getRow(`
+                    SELECT
+                        SUM(
+                            CASE
+                                WHEN duration > ? THEN ?
+                                ELSE duration
+                            END
+                        ) AS total_duration,
+                        SUM(
+                            CASE
+                                WHEN (status = 1 OR status = 3) THEN
+                                    CASE
+                                        WHEN duration > ? THEN ?
+                                        ELSE duration
+                                    END
+                                ELSE 0
+                            END
+                        ) AS uptime_duration
+                    FROM heartbeat
+                    WHERE time >= ? AND time <= ? AND monitor_id = ?
+                `, [
+                    timeWindowSeconds, timeWindowSeconds,
+                    timeWindowSeconds, timeWindowSeconds,
+                    startTimeUTC, endTimeUTC, monitorID
+                ]);
+
+                const queryDuration = Date.now() - queryStartTime;
+
+                let totalDuration = result.total_duration || 0;
+                let uptimeDuration = result.uptime_duration || 0;
+                let uptime = 0;
+
+                if (totalDuration > 0) {
+                    uptime = uptimeDuration / totalDuration;
+                    if (uptime < 0) {
+                        uptime = 0;
+                    }
+                }
+
+                const totalDurationMs = Date.now() - startTime;
+
+                log.info("server", `Custom range uptime calculated: ${(uptime * 100).toFixed(2)}% | Query: ${queryDuration}ms | Total: ${totalDurationMs}ms | Monitor: ${monitorID}`);
+
+                callback({
+                    ok: true,
+                    uptime: uptime
+                });
+
+            } catch (e) {
+                log.error("server", `Error calculating custom range uptime: ${e.message}`);
                 callback({
                     ok: false,
                     msg: e.message,

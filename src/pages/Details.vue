@@ -282,6 +282,19 @@
                         </span>
                     </div>
 
+                    <!-- Uptime (Custom Time Range) -->
+                    <div
+                        class="col-12 col-sm col row d-flex align-items-center d-sm-block"
+                    >
+                        <h4 class="col-4 col-sm-12">{{ $t("Uptime") }}</h4>
+                        <p class="col-4 col-sm-12 mb-0 mb-sm-2">
+                            <TimeRangeSelector @range-changed="onTimeRangeChanged" />
+                        </p>
+                        <span class="col-4 col-sm-12 num">
+                            {{ timeRangeUptime }}%
+                        </span>
+                    </div>
+
                     <div
                         v-if="tlsInfo"
                         class="col-12 col-sm col row d-flex align-items-center d-sm-block"
@@ -392,6 +405,7 @@
                             <th>{{ $t("Status") }}</th>
                             <th>{{ $t("DateTime") }}</th>
                             <th>{{ $t("Message") }}</th>
+                            <th width="120">{{ $t("Actions") }}</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -405,10 +419,20 @@
                                 <Datetime :value="beat.time" />
                             </td>
                             <td class="border-0">{{ beat.msg }}</td>
+                            <td class="border-0">
+                                <button
+                                    v-if="beat.status === 0 && lastHeartBeat.status !== 0"
+                                    class="btn btn-sm btn-outline-warning"
+                                    :title="$t('Mark as Maintenance')"
+                                    @click="markHeartbeatAsMaintenance(beat)"
+                                >
+                                    <font-awesome-icon icon="wrench" />
+                                </button>
+                            </td>
                         </tr>
 
                         <tr v-if="importantHeartBeatListLength === 0">
-                            <td colspan="3">
+                            <td colspan="4">
                                 {{ $t("No important events") }}
                             </td>
                         </tr>
@@ -463,6 +487,16 @@
             >
                 {{ $t("clearHeartbeatsMsg") }}
             </Confirm>
+
+            <Confirm
+                ref="confirmMarkHeartbeatMaintenance"
+                btn-style="btn-warning"
+                :yes-text="$t('Yes')"
+                :no-text="$t('No')"
+                @yes="confirmMarkHeartbeatAsMaintenance"
+            >
+                {{ $t("Are you sure you want to mark this downtime period as maintenance?") }}
+            </Confirm>
         </div>
     </transition>
 </template>
@@ -477,6 +511,7 @@ import Status from "../components/Status.vue";
 import Datetime from "../components/Datetime.vue";
 import CountUp from "../components/CountUp.vue";
 import Uptime from "../components/Uptime.vue";
+import TimeRangeSelector from "../components/TimeRangeSelector.vue";
 import Pagination from "v-pagination-3";
 const PingChart = defineAsyncComponent(() =>
     import("../components/PingChart.vue")
@@ -502,6 +537,7 @@ export default {
         CountUp,
         Datetime,
         HeartbeatBar,
+        TimeRangeSelector,
         Confirm,
         Status,
         Pagination,
@@ -530,6 +566,15 @@ export default {
                 currentExample: "javascript-fetch",
                 code: "",
             },
+            timeRange: {
+                from: new Date(Date.now() - 24 * 60 * 60 * 1000),
+                to: new Date(),
+                range: "24h",
+                label: "Last 24 hours"
+            },
+            selectedBeat: null,
+            customRangeUptime: null,
+            loadingCustomUptime: false,
         };
     },
     computed: {
@@ -628,6 +673,44 @@ export default {
             } else {
                 return "";
             }
+        },
+
+        timeRangeUptime() {
+            // Use pre-calculated server data for standard ranges
+            if (this.timeRange.range === "24h") {
+                const key = this.monitor.id + "_24";
+                if (this.$root.uptimeList[key] !== undefined) {
+                    return Math.round(this.$root.uptimeList[key] * 100 * 100) / 100;
+                }
+            }
+
+            if (this.timeRange.range === "30d") {
+                const key = this.monitor.id + "_720";
+                if (this.$root.uptimeList[key] !== undefined) {
+                    return Math.round(this.$root.uptimeList[key] * 100 * 100) / 100;
+                }
+            }
+
+            // For custom ranges and short ranges, use server-calculated uptime
+            if (this.customRangeUptime !== null) {
+                return Math.round(this.customRangeUptime * 100 * 100) / 100;
+            }
+
+            // Loading state
+            if (this.loadingCustomUptime) {
+                return "...";
+            }
+
+            // Fallback to current status
+            if (this.lastHeartBeat && this.lastHeartBeat.status !== undefined) {
+                if (this.lastHeartBeat.status === 1 || this.lastHeartBeat.status === 3) {
+                    return 100.0;
+                } else {
+                    return 0.0;
+                }
+            }
+
+            return "N/A";
         },
     },
 
@@ -929,6 +1012,81 @@ export default {
 
         secondsToHumanReadableFormat(seconds) {
             return relativeTimeFormatter.secondsToHumanReadableFormat(seconds);
+        },
+
+        /**
+         * Show confirmation dialog for marking heartbeat as maintenance
+         * @param {object} beat - The heartbeat to mark
+         * @returns {void}
+         */
+        markHeartbeatAsMaintenance(beat) {
+            // Store the beat data for later use in confirmation
+            this.selectedBeat = beat;
+            this.$refs.confirmMarkHeartbeatMaintenance.show();
+        },
+
+        /**
+         * Actually mark the heartbeat as maintenance after confirmation
+         * @returns {void}
+         */
+        confirmMarkHeartbeatAsMaintenance() {
+            const beat = this.selectedBeat;
+            if (!beat) {
+                return;
+            }
+
+            // Convert Vue proxy to plain object and extract values
+            const plainBeat = JSON.parse(JSON.stringify(beat));
+            const timestamp = String(plainBeat.time);
+            const monitorId = Number(this.monitor.id);
+
+            this.$root.getSocket().emit("markHeartbeatAsMaintenance", monitorId, timestamp, (res) => {
+                if (res && res.ok) {
+                    toast.success(this.$t("Downtime period marked as maintenance"));
+                    // Refresh the heartbeat list
+                    this.getImportantHeartbeatListLength();
+                } else {
+                    toast.error(res?.msg || this.$t("Failed to mark as maintenance"));
+                }
+            });
+        },
+
+        /**
+         * Handle time range selection change
+         * @param {object} timeRange - The selected time range
+         * @returns {void}
+         */
+        onTimeRangeChanged(timeRange) {
+            this.timeRange = timeRange;
+
+            // For non-standard ranges, request server-side calculation
+            if (timeRange.range !== "24h" && timeRange.range !== "30d") {
+                this.requestCustomRangeUptime(timeRange);
+            } else {
+                // Clear custom uptime for standard ranges
+                this.customRangeUptime = null;
+                this.loadingCustomUptime = false;
+            }
+        },
+
+        /**
+         * Request server-side uptime calculation for custom/short ranges
+         * @param {object} timeRange - The time range to calculate
+         * @returns {void}
+         */
+        requestCustomRangeUptime(timeRange) {
+            this.loadingCustomUptime = true;
+            this.customRangeUptime = null;
+
+            this.$root.getSocket().emit("getCustomRangeUptime", this.monitor.id, timeRange.from, timeRange.to, (res) => {
+                this.loadingCustomUptime = false;
+
+                if (res.ok) {
+                    this.customRangeUptime = res.uptime;
+                } else {
+                    this.customRangeUptime = null;
+                }
+            });
         },
     },
 };
