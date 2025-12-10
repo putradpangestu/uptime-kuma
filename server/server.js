@@ -1601,24 +1601,43 @@ let needSetup = false;
 
                 log.info("manage", `Updating heartbeats from ${startTime || "beginning"} to ${endTime || "end"} ${endTime ? "(exclusive)" : ""}`);
 
+                // First, get the count of DOWN heartbeats that will be updated (for stat adjustment)
+                let countQuery;
+                let countParams;
+
+                if (startTime && endTime) {
+                    countQuery = "SELECT COUNT(*) as count FROM heartbeat WHERE monitor_id = ? AND time > ? AND time < ? AND status = 0";
+                    countParams = [ monitorID, startTime, endTime ];
+                } else if (startTime) {
+                    countQuery = "SELECT COUNT(*) as count FROM heartbeat WHERE monitor_id = ? AND time > ? AND status = 0";
+                    countParams = [ monitorID, startTime ];
+                } else if (endTime) {
+                    countQuery = "SELECT COUNT(*) as count FROM heartbeat WHERE monitor_id = ? AND time < ? AND status = 0";
+                    countParams = [ monitorID, endTime ];
+                } else {
+                    countQuery = "SELECT COUNT(*) as count FROM heartbeat WHERE monitor_id = ? AND status = 0";
+                    countParams = [ monitorID ];
+                }
+
+                const countResult = await R.getRow(countQuery, countParams);
+                const affectedCount = countResult ? countResult.count : 0;
+
+                log.info("manage", `Affected heartbeats count: ${affectedCount}`);
+
                 // Update all DOWN heartbeats in this downtime period
                 let updateQuery;
                 let updateParams;
 
                 if (startTime && endTime) {
-                    // Update between last UP and next UP
                     updateQuery = "UPDATE heartbeat SET status = ? WHERE monitor_id = ? AND time > ? AND time < ? AND status = 0";
                     updateParams = [ 3, monitorID, startTime, endTime ];
                 } else if (startTime) {
-                    // Update from after last UP to end
                     updateQuery = "UPDATE heartbeat SET status = ? WHERE monitor_id = ? AND time > ? AND status = 0";
                     updateParams = [ 3, monitorID, startTime ];
                 } else if (endTime) {
-                    // Update from beginning to before next UP
                     updateQuery = "UPDATE heartbeat SET status = ? WHERE monitor_id = ? AND time < ? AND status = 0";
                     updateParams = [ 3, monitorID, endTime ];
                 } else {
-                    // Update all DOWN heartbeats for this monitor
                     updateQuery = "UPDATE heartbeat SET status = ? WHERE monitor_id = ? AND status = 0";
                     updateParams = [ 3, monitorID ];
                 }
@@ -1630,9 +1649,54 @@ let needSetup = false;
                     throw sqlError;
                 }
 
+                // In v2.0.2, uptime is calculated from stat_* tables, not heartbeat table directly.
+                // We need to recalculate the statistics for the affected time periods.
+                // The simplest approach is to reset the UptimeCalculator cache and recalculate from heartbeat data.
+
+                // Remove the cached UptimeCalculator for this monitor to force recalculation
+                const { UptimeCalculator } = require("./uptime-calculator");
+                await UptimeCalculator.remove(monitorID);
+
+                // Recalculate statistics from heartbeat data for affected periods
+                // Get all heartbeats for this monitor and rebuild stats
+                log.info("manage", `Recalculating statistics for monitor ${monitorID}...`);
+
+                // Delete existing stat records for this monitor (they will be rebuilt)
+                await R.exec("DELETE FROM stat_minutely WHERE monitor_id = ?", [ monitorID ]);
+                await R.exec("DELETE FROM stat_hourly WHERE monitor_id = ?", [ monitorID ]);
+                await R.exec("DELETE FROM stat_daily WHERE monitor_id = ?", [ monitorID ]);
+
+                // Get all heartbeats and rebuild statistics
+                const allHeartbeats = await R.find("heartbeat", " monitor_id = ? ORDER BY time ASC", [ monitorID ]);
+
+                if (allHeartbeats.length > 0) {
+                    const uptimeCalculator = await UptimeCalculator.getUptimeCalculator(monitorID);
+                    uptimeCalculator.setMigrationMode(true);
+
+                    const dayjs = require("dayjs");
+                    const utc = require("dayjs/plugin/utc");
+                    dayjs.extend(utc);
+
+                    for (const hb of allHeartbeats) {
+                        const date = dayjs.utc(hb.time);
+                        await uptimeCalculator.update(hb.status, hb.ping || 0, date);
+                    }
+
+                    uptimeCalculator.setMigrationMode(false);
+                    log.info("manage", `Statistics recalculated for monitor ${monitorID} (${allHeartbeats.length} heartbeats)`);
+                }
+
                 // Send updated heartbeat list to all clients
                 await sendHeartbeatList(socket, monitorID, true, true);
                 await sendImportantHeartbeatList(socket, monitorID, true, true);
+
+                // Also send updated uptime data
+                const uptimeCalculator = await UptimeCalculator.getUptimeCalculator(monitorID);
+                const data24 = uptimeCalculator.get24Hour();
+                const data30d = uptimeCalculator.get30Day();
+
+                io.to(socket.userID).emit("uptime", monitorID, 24, data24.uptime);
+                io.to(socket.userID).emit("uptime", monitorID, 720, data30d.uptime);
 
                 callback({
                     ok: true,
@@ -1640,6 +1704,7 @@ let needSetup = false;
                 });
 
             } catch (e) {
+                log.error("manage", `Error marking heartbeat as maintenance: ${e.message}`);
                 callback({
                     ok: false,
                     msg: e.message,
